@@ -264,6 +264,19 @@ get_model() {
         return 0
     fi
 
+    # Fall back to sibling repos' models dirs (e.g. the final repo that holds
+    # the already-downloaded GGUFs) before re-downloading a multi-GB file.
+    local src real_src alt
+    for src in "$ROOT/../final" "$ROOT/.."; do
+        real_src="$(cd "$src" 2>/dev/null && pwd)" || continue
+        alt="$real_src/models/$rel_path"
+        if [[ -f "$alt" ]]; then
+            echo "Using model from sibling repo: $alt" >&2
+            echo "$alt"
+            return 0
+        fi
+    done
+
     local repo="${CATALOG_REPO[$model_name]}"
     local file="${CATALOG_FILE[$model_name]}"
     if [[ -z "$repo" ]]; then
