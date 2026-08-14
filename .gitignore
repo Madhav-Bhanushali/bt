@@ -1,3 +1,5 @@
 # Model binaries are downloaded on demand (see download-model.sh), never
 # committed: GitHub rejects files over 100 MB.
 models/**/*.gguf
+stress_results.txt
+benchmark_results.txt
