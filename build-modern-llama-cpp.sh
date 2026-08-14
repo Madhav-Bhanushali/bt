@@ -9,14 +9,18 @@
 #   bash build-modern-llama-cpp.sh [srcdir] [branch|tag]
 #     srcdir   default: /home/ubuntu/llama.cpp
 #     branch   default: master   (use a release tag for stability)
+#     CUDA_ARCH env: default native (auto-detect); e.g. 100 for Blackwell,
+#                   86 for A10G, 89 for RTX 40 series, 120 for RTX 50 series.
 set -euo pipefail
 
 SRC="${1:-/home/ubuntu/llama.cpp}"
 BRANCH="${2:-master}"
 BUILD="$SRC/build_cuda"
+ARCH="${CUDA_ARCH:-native}"
 
 command -v nvcc >/dev/null 2>&1 || { echo "ERROR: CUDA toolkit not found (nvcc)"; exit 1; }
 echo "nvcc: $(nvcc --version | grep release)"
+echo "CUDA arch: $ARCH (set CUDA_ARCH=100 for Blackwell, 86 for A10G if native fails)"
 
 if [[ ! -d "$SRC/.git" ]]; then
     git clone --depth 1 --branch "$BRANCH" https://github.com/ggerganov/llama.cpp.git "$SRC"
@@ -30,7 +34,7 @@ cd "$SRC"
 echo "Building upstream llama.cpp @ $(git rev-parse --short HEAD) ..."
 cmake -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
     -DGGML_CUDA=ON \
-    -DCMAKE_CUDA_ARCHITECTURES=86 \
+    -DCMAKE_CUDA_ARCHITECTURES="$ARCH" \
     -DLLAMA_CURL=OFF \
     -DLLAMA_NATIVE=ON
 cmake --build "$BUILD" --target llama-server -j"$(nproc)"
