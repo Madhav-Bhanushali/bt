@@ -249,6 +249,23 @@ echo "Levels     : $LEVELS | rounds/level: $ROUNDS | cache_prompt: $CACHE_PROMPT
 echo "Port       : $PORT | req timeout: ${REQUEST_TIMEOUT}s | sustain: ${SUSTAIN}s"
 echo
 
+# --- VRAM pre-flight --------------------------------------------------------
+if [[ "$USE_GPU_RUN" -eq 1 ]]; then
+    model_mib="$(stat -c%s "$MODEL" 2>/dev/null || echo 0)"
+    model_mib=$((model_mib / 1048576))
+    kv_mib=$((PARALLEL * KV_BYTES_PER_TOKEN * CTX / 1048576))
+    need_mib=$((model_mib + kv_mib))
+    echo "VRAM need : ~${need_mib} MiB (model ${model_mib} + ${PARALLEL}x KV ${kv_mib})"
+    if [[ "$need_mib" -gt $((GPU_FREE_MIB + 256)) ]]; then
+        echo
+        echo "ERROR: not enough free VRAM (${GPU_FREE_MIB} MiB free, need ~${need_mib} MiB)."
+        echo "The model cannot be offloaded to the GPU. Current VRAM holders:"
+        nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv,noheader 2>/dev/null | sed 's/^/  /'
+        echo "Free VRAM first, e.g.:  sudo pkill -9 -f llama-server"
+        exit 1
+    fi
+fi
+
 if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "DRY RUN - no server started. Recommended settings above."
     echo "Next: bash stress-test.sh $*"
