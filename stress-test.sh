@@ -310,7 +310,7 @@ wait_server_ready() {
 GPU_FLAGS=()
 if [[ "$USE_GPU_RUN" -eq 1 ]]; then
     GPU_FLAGS=(-ngl "$NGL")
-    [[ "$FLASH_ATTN" -eq 1 ]] && GPU_FLAGS+=(-fa)
+    [[ "$FLASH_ATTN" -eq 1 ]] && GPU_FLAGS+=(-fa on)
 fi
 
 start_server() {
@@ -358,7 +358,7 @@ if [[ "$USE_GPU_RUN" -eq 1 ]]; then
         echo "WARNING: GPU start failed - falling back to CPU-only (ngl 0)."
         GPU_FLAGS=(-ngl 0)
         PARALLEL=4
-        [[ "$FLASH_ATTN" -eq 1 ]] && GPU_FLAGS+=(-fa)
+        [[ "$FLASH_ATTN" -eq 1 ]] && GPU_FLAGS+=(-fa on)
         USE_GPU_RUN=0
         if ! start_server "$SERVER_LOG"; then
             echo "ERROR: server did not become ready."
