@@ -295,9 +295,12 @@ trap '[[ -n "${SERVER_PID:-}" ]] && kill "$SERVER_PID" 2>/dev/null; rm -rf "$TMP
 # --- server start (GPU first, CPU fallback) ---------------------------------
 wait_server_ready() {
     local i
-    for ((i=0; i<600; i++)); do
+    for ((i=0; i<120; i++)); do
         if curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
             return 0
+        fi
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            return 1
         fi
         sleep 0.5
     done
@@ -332,6 +335,8 @@ start_server() {
     fi
     kill "$SERVER_PID" 2>/dev/null
     wait "$SERVER_PID" 2>/dev/null
+    echo "Server did not become ready (or died). Last log lines:"
+    tail -n 30 "$log" 2>/dev/null | sed 's/^/  /'
     return 1
 }
 
