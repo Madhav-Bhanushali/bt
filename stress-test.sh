@@ -32,6 +32,8 @@ SUSTAIN=0
 PORT=8090
 REQUEST_TIMEOUT=120
 CACHE_PROMPT=1
+BATCH=4096
+UBATCH=2048
 NGL=999                    # offload as many layers as possible
 FLASH_ATTN=1
 USE_GPU=auto               # auto = use GPU if detected
@@ -58,6 +60,8 @@ usage() {
     echo "  --rounds N            concurrent rounds per level (default: $ROUNDS)"
     echo "  --parallel auto|N     llama-server slots (default: auto = from context/prompt budget)"
     echo "  --ctx N               context size (default: $CTX; smaller = more slots)"
+    echo "  --batch N             max tokens per batch (default: $BATCH)"
+    echo "  --ubatch N            max tokens per ubatch (default: $UBATCH; raise to 4096 for a single-stream speedup)"
     echo "  --predict N           max output tokens (default: $PREDICT)"
     echo "  --gpu N               layers to offload (default: $NGL = all possible)"
     echo "  --flash-attn/--no-flash-attn"
@@ -78,6 +82,8 @@ while [[ $# -gt 0 ]]; do
         --rounds) ROUNDS="$2"; shift 2 ;;
         --parallel) PARALLEL="$2"; shift 2 ;;
         --ctx) CTX="$2"; shift 2 ;;
+        --batch) BATCH="$2"; shift 2 ;;
+        --ubatch) UBATCH="$2"; shift 2 ;;
         --predict) PREDICT="$2"; shift 2 ;;
         --gpu) NGL="$2"; shift 2 ;;
         --flash-attn) FLASH_ATTN=1; shift ;;
@@ -181,15 +187,16 @@ detect_gpu() {
 
 # Suggested parallel slot count.
 # Total KV cache = CTX * KV_BYTES_PER_TOKEN regardless of slot count (the server
-# splits -c CTX across slots), so slots do NOT multiply VRAM use. Instead we size
-# slots so each slot keeps enough context for the prompt + predict (capped at 32).
+# splits -c CTX across slots), so slots do NOT multiply VRAM use. Slots are sized
+# so each keeps enough context for the prompt + predict; capped at 12 to keep
+# per-request generation from being crushed by GPU sharing.
 auto_parallel() {
     local nchars="${#SYSTEM_PROMPT}"
     local est_tokens=$(( nchars / 3 + 40 ))       # rough tokens incl. user message
     local slot_ctx=$(( est_tokens + PREDICT + 64 ))
     local p=$(( CTX / slot_ctx ))
     (( p < 1 )) && p=1
-    (( p > 32 )) && p=32
+    (( p > 12 )) && p=12
     echo "$p"
 }
 
@@ -326,7 +333,7 @@ start_server() {
         -c "$CTX" \
         -t "$THREADS" \
         -tb "$THREADS" \
-        -b 4096 -ub 2048 \
+        -b "$BATCH" -ub "$UBATCH" \
         --port "$PORT" \
         --host 127.0.0.1 \
         --no-webui \
@@ -484,7 +491,7 @@ PY
 {
     echo "Ternary Bonsai 8B - stress results"
     echo "Model: $MODEL"
-    echo "Server: $LLAMA_SERVER | threads $THREADS | parallel $PARALLEL | ctx $CTX | predict $PREDICT"
+    echo "Server: $LLAMA_SERVER | threads $THREADS | parallel $PARALLEL | ctx $CTX | predict $PREDICT | batch $BATCH/$UBATCH"
     echo "GPU: ${GPU_NAME:-none} | offload: $([ "$USE_GPU_RUN" -eq 1 ] && echo "-ngl $NGL" || echo CPU) | flash-attn: $([ "$FLASH_ATTN" -eq 1 ] && echo yes || echo no)"
     echo "Rounds/level: $ROUNDS | cache_prompt: $CACHE_PROMPT | req timeout: ${REQUEST_TIMEOUT}s"
     echo
