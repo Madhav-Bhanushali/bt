@@ -8,6 +8,13 @@ set -euo pipefail
 
 REPO="Minarut/Ternary-Bonsai-8B-GGUF-llamacpp-compatible"
 FILE="${1:-Ternary-Bonsai-8B-TQ2_0.gguf}"
+case "$FILE" in
+    Q4_0|Q4_0-lossless)              FILE="Ternary-Bonsai-8B-Q4_0-lossless.gguf" ;;
+    TQ2_0)                           FILE="Ternary-Bonsai-8B-TQ2_0.gguf" ;;
+    TQ2_0-Q6out|Q6out)               FILE="Ternary-Bonsai-8B-TQ2_0-Q6out.gguf" ;;
+    *.gguf) : ;;                      # full filename passed directly
+    *) echo "Unknown variant: $1 (use TQ2_0 | Q4_0-lossless | TQ2_0-Q6out)"; exit 1 ;;
+esac
 DEST="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/models/standard/$FILE"
 
 if [[ -f "$DEST" ]]; then
