@@ -335,6 +335,17 @@ start_server() {
     return 1
 }
 
+# Refuse to run if another process already owns the port - otherwise the health
+# probe would silently talk to a stale server (wrong model / wrong build).
+if curl -sf --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+    echo "ERROR: port $PORT is already serving a process."
+    echo "Occupant(s):"
+    pgrep -af llama-server 2>/dev/null | grep -E ":$PORT([[:space:]]|$)" || true
+    ss -tlnp 2>/dev/null | grep -E ":$PORT " | sed 's/^/  /' || true
+    echo "Kill the leftover server first, e.g.:  sudo pkill -9 -f llama-server"
+    exit 1
+fi
+
 SERVER_LOG="$TMP_DIR/server.log"
 if [[ "$USE_GPU_RUN" -eq 1 ]]; then
     echo "Starting server with GPU offload (-ngl $NGL)..."
@@ -488,6 +499,24 @@ for level in $LEVELS; do
         echo "Concurrency $level  ($((level * ROUNDS)) requests, $ok ok / $fail failed)"
         aggregate "$outdir" "$wall"
     } >> "$RESULTS"
+
+    # Re-confirm GPU usage after real inference - some backends allocate VRAM
+    # lazily on first compute, so the post-ready check alone can be a false alarm.
+    if [[ "$USE_GPU_RUN" -eq 1 && "${GPU_CHECKED:-0}" != "1" ]]; then
+        GPU_CHECKED=1
+        gpumem2="$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2>/dev/null \
+            | awk -F', ' -v p="$SERVER_PID" '$1==p {print $2}')"
+        if [[ -z "$gpumem2" ]]; then
+            gpumem2="$(nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv,noheader,nounits 2>/dev/null \
+                | grep -i 'llama-server' | head -n 1)"
+        fi
+        if [[ -n "$gpumem2" ]]; then
+            echo "GPU confirmed after round 1: llama-server holds VRAM ($gpumem2 MiB)."
+        else
+            echo "WARNING after round 1: still no VRAM - model is running on CPU."
+        fi
+        echo
+    fi
     echo
 done
 
