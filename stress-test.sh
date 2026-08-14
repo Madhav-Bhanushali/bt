@@ -336,7 +336,7 @@ start_server() {
         -b "$BATCH" -ub "$UBATCH" \
         --port "$PORT" \
         --host 127.0.0.1 \
-        --no-webui \
+        --no-ui \
         --temp 0.2 \
         --seed 42 \
         --parallel "$PARALLEL" \
