@@ -48,7 +48,6 @@ local_src="$ROOT"
 if [[ -f "$local_src/CMakeLists.txt" ]]; then
     SRC="$local_src"
 else
-    local root
     while read -r root; do
         [[ -n "$root" ]] || continue
         if [[ -f "$root/CMakeLists.txt" && -d "$root/3rdparty/llama.cpp" ]]; then
@@ -64,6 +63,15 @@ if [[ -z "$SRC" ]]; then
 fi
 echo "Source repo : $SRC"
 
+# Build llama.cpp standalone (not from the BitNet root): as a standalone project
+# LLAMA_BUILD_SERVER is on by default, so the llama-server target is always
+# generated. The fork's llama.cpp already contains the ternary kernels.
+LLAMA_CPP="$SRC/3rdparty/llama.cpp"
+if [[ ! -d "$LLAMA_CPP" ]]; then
+    echo "ERROR: $LLAMA_CPP not found."
+    exit 1
+fi
+
 # nvcc must be present to compile CUDA kernels.
 if ! command -v nvcc >/dev/null 2>&1; then
     echo "ERROR: nvcc not found - the CUDA toolkit is not installed."
@@ -78,16 +86,26 @@ if [[ "$JOBS" -eq 0 ]]; then
 fi
 
 BDIR="$SRC/build_cuda"
+if [[ -f "$BDIR/CMakeCache.txt" ]]; then
+    cached_src="$(grep -E '^CMAKE_HOME_DIRECTORY:' "$BDIR/CMakeCache.txt" | cut -d'=' -f2)"
+    if [[ "$cached_src" != "$LLAMA_CPP" ]]; then
+        echo "Existing build_cuda was configured from a different source ($cached_src)."
+        echo "Removing it and reconfiguring..."
+        rm -rf "$BDIR"
+    fi
+fi
 if [[ ! -f "$BDIR/CMakeCache.txt" ]]; then
     echo
     echo "Configuring CUDA build in $BDIR (arch sm_$ARCH)..."
     echo
-    cmake -S "$SRC" -B "$BDIR" \
+    cmake -S "$LLAMA_CPP" -B "$BDIR" \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_CUDA=ON \
         -DCMAKE_CUDA_ARCHITECTURES="$ARCH" \
         -DLLAMA_BUILD_SERVER=ON \
-        -DLLAMA_BUILD_COMMON=ON
+        -DLLAMA_BUILD_COMMON=ON \
+        -DLLAMA_BUILD_EXAMPLES=OFF \
+        -DLLAMA_BUILD_TESTS=OFF
     if [[ $? -ne 0 ]]; then
         echo "ERROR: cmake configure failed."
         exit 1
@@ -113,7 +131,7 @@ if [[ -x "$EXE" ]]; then
     echo "  LLAMA_SERVER=$EXE bash stress-test.sh"
     echo
     echo "Quick GPU check:"
-    echo "  timeout 20 $EXE -m models/standard/Ternary-Bonsai-8B-TQ2_0.gguf -ngl 999 --port 8095 --no-webui 2>&1 | grep -iE 'offload|cuda|error' | head"
+    echo "  timeout 20 $EXE -m $SRC/models/standard/Ternary-Bonsai-8B-TQ2_0.gguf -ngl 999 --port 8095 --no-webui 2>&1 | grep -iE 'offload|cuda|error|kernel' | head"
 else
     echo "ERROR: built but binary not found at $EXE"
     exit 1
