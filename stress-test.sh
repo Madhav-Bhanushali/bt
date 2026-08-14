@@ -338,7 +338,21 @@ else
 fi
 echo "Server ready (pid $SERVER_PID). Starting load..."
 if [[ "$USE_GPU_RUN" -eq 1 ]]; then
-    grep -iE "offload|device" "$SERVER_LOG" | head -n 8
+    echo "--- GPU status ---"
+    grep -iE "offloaded|ggml_cuda_init|compute device|VRAM|cuda|no kernel|error" "$SERVER_LOG" | head -n 12 || true
+    if ! grep -qiE "offloaded .* layer.* (to )?gpu|ggml_cuda_init|compute device" "$SERVER_LOG"; then
+        echo
+        echo "WARNING: no GPU offload detected in the server log - the llama-server binary"
+        echo "is either CPU-only or has no CUDA kernel for this ternary quantization."
+        echo "Full log: $SERVER_LOG"
+        echo
+        echo "To build a CUDA-enabled llama-server (run inside the BitNet source repo, e.g. ../final):"
+        echo "  nvcc --version    # CUDA toolkit must be installed"
+        echo "  cmake -S . -B build_cuda -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON \\"
+        echo "        -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_COMMON=ON"
+        echo "  cmake --build build_cuda --target llama-server -j\$(nproc)"
+        echo "  LLAMA_SERVER=<repo>/build_cuda/bin/llama-server bash stress-test.sh"
+    fi
 fi
 echo
 
