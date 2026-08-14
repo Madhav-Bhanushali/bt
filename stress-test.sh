@@ -399,6 +399,9 @@ if [[ "$USE_GPU_RUN" -eq 1 ]]; then
     fi
     if [[ -n "$gpumem" ]]; then
         echo "GPU confirmed: llama-server holds VRAM ($gpumem MiB)."
+        # Modern llama.cpp prints offload/VRAM lines; surface them so we can see
+        # whether every layer made it to the GPU.
+        grep -iE "offloaded .* layers|total VRAM used|device.*mem|gpu" "$SERVER_LOG" 2>/dev/null | head -n 6 | sed 's/^/  /' || true
     else
         echo "WARNING: llama-server is not holding VRAM - the model is running on CPU."
     fi
