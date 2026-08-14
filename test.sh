@@ -264,18 +264,18 @@ get_model() {
         return 0
     fi
 
-    # Fall back to sibling repos' models dirs (e.g. the final repo that holds
-    # the already-downloaded GGUFs) before re-downloading a multi-GB file.
-    local src real_src alt
-    for src in "$ROOT/../final" "$ROOT/.."; do
-        real_src="$(cd "$src" 2>/dev/null && pwd)" || continue
-        alt="$real_src/models/$rel_path"
+    # Fall back to ancestor/sibling repos' models dirs (e.g. the final repo
+    # that already holds the downloaded GGUFs) before re-downloading multi-GB.
+    local root alt
+    while read -r root; do
+        [[ -n "$root" ]] || continue
+        alt="$root/models/$rel_path"
         if [[ -f "$alt" ]]; then
             echo "Using model from sibling repo: $alt" >&2
             echo "$alt"
             return 0
         fi
-    done
+    done < <(sibling_roots)
 
     local repo="${CATALOG_REPO[$model_name]}"
     local file="${CATALOG_FILE[$model_name]}"
@@ -306,6 +306,22 @@ get_model() {
 # SERVER MANAGEMENT  (llama-server resident in RAM)
 # ============================================================
 
+# Emit candidate source/build/model roots: every ancestor of this repo plus a
+# "final" repo beside it, e.g. from ser/ser/bt/bt we find ser/ser/final.
+sibling_roots() {
+    local p="$ROOT" prev=""
+    local i
+    for ((i=0; i<6; i++)); do
+        p="$(dirname "$p")"
+        [[ "$p" == "$prev" ]] && break
+        prev="$p"
+        echo "$p"
+        if [[ -d "$p/final" ]]; then
+            echo "$p/final"
+        fi
+    done
+}
+
 resolve_llama_server() {
     local candidates=(
         "$ROOT/build_server/bin/llama-server"
@@ -315,17 +331,16 @@ resolve_llama_server() {
     )
     # When this harness lives in a copied repo (e.g. the bt repo) next to the
     # BitNet source repo it was extracted from, reuse that repo's build binary.
-    local src c
-    for src in "$ROOT/../final" "$ROOT/.."; do
-        local real_src
-        real_src="$(cd "$src" 2>/dev/null && pwd)" || continue
+    local root c
+    while read -r root; do
+        [[ -n "$root" ]] || continue
         candidates+=(
-            "$real_src/build_server/bin/llama-server"
-            "$real_src/build/bin/llama-server"
-            "$real_src/build_server/bin/Release/llama-server"
-            "$real_src/build/bin/Release/llama-server"
+            "$root/build_server/bin/llama-server"
+            "$root/build/bin/llama-server"
+            "$root/build_server/bin/Release/llama-server"
+            "$root/build/bin/Release/llama-server"
         )
-    done
+    done < <(sibling_roots)
     for c in "${candidates[@]}"; do
         if [[ -x "$c" ]] || [[ -x "$c.exe" ]]; then
             [[ -x "$c" ]] && echo "$c" || echo "$c.exe"
@@ -340,20 +355,20 @@ build_llama_server() {
     echo "Building llama-server (this can take a few minutes)..."
     echo
 
-    # Source root: this repo if it has CMakeLists.txt, otherwise a sibling
-    # BitNet source repo (e.g. the final repo that this harness was copied from).
-    local src="$ROOT"
+    # Source root: this repo if it has CMakeLists.txt, otherwise an ancestor or
+    # sibling "final" BitNet source repo (the harness was copied out of).
+    local src="$ROOT" root
     if [[ ! -f "$ROOT/CMakeLists.txt" ]]; then
-        local cand real_src
-        for cand in "$ROOT/../final" "$ROOT/.."; do
-            if real_src="$(cd "$cand" 2>/dev/null && pwd)" && [[ -f "$real_src/CMakeLists.txt" ]]; then
-                src="$real_src"
+        while read -r root; do
+            [[ -n "$root" ]] || continue
+            if [[ -f "$root/CMakeLists.txt" ]]; then
+                src="$root"
                 break
             fi
-        done
+        done < <(sibling_roots)
     fi
     if [[ ! -f "$src/CMakeLists.txt" ]]; then
-        echo "ERROR: no BitNet source (CMakeLists.txt) at $ROOT or in sibling repos."
+        echo "ERROR: no BitNet source (CMakeLists.txt) at $ROOT or in ancestor/sibling repos."
         echo "Point LLAMA_SERVER=/path/to/llama-server at an existing binary and re-run."
         return 1
     fi
