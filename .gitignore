@@ -1,0 +1,3 @@
+# Model binaries are too large for GitHub's 100 MB per-file limit,
+# so they stay local-only. Track the model via the config JSON instead.
+models/**/*.gguf

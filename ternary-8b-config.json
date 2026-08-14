@@ -9,7 +9,8 @@
   "source": {
     "huggingface_repo": "Minarut/Ternary-Bonsai-8B-GGUF-llamacpp-compatible",
     "huggingface_file": "Ternary-Bonsai-8B-TQ2_0.gguf",
-    "local_path": "models/standard/Ternary-Bonsai-8B-TQ2_0.gguf"
+    "local_path": "models/standard/Ternary-Bonsai-8B-TQ2_0.gguf",
+    "local_copy_complete": true
   },
   "inference": {
     "context_size": 8192,
