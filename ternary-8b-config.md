@@ -16,6 +16,16 @@ See [`ternary-8b-config.json`](ternary-8b-config.json) for the full config: Hugg
 | Thinking | disabled via `chat_template_kwargs: {"enable_thinking": false}` |
 | Cache prompt | on (fast per-test prompt eval) |
 
+## GPU: use the Q4_0-lossless variant
+
+`TQ2_0` has **no CUDA kernel** in the llama.cpp fork — the weights sit in VRAM but the ternary matmul runs on CPU (~10–19 tok/s), so the A10G stays idle. The same model pack ships a **`Q4_0-lossless`** GGUF (4.61 GB) that encodes the identical {-1, 0, 1} weights losslessly and is fully CUDA-accelerated:
+
+```bash
+bash download-model.sh Q4_0-lossless
+LLAMA_SERVER=/home/ubuntu/falcon3/ser/ser/final/build_cuda/bin/llama-server bash stress-test.sh   # defaults to Q4_0-lossless now
+# or explicitly: bash stress-test.sh --model standard/Ternary-Bonsai-8B-Q4_0-lossless.gguf
+```
+
 ## Repo layout (ternary model focus)
 
 | Path | Purpose |

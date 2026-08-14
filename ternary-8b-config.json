@@ -12,6 +12,13 @@
     "local_path": "models/standard/Ternary-Bonsai-8B-TQ2_0.gguf",
     "download": "bash download-model.sh (or test.sh auto-downloads when missing)"
   },
+  "gpu_variant": {
+    "note": "TQ2_0 has no CUDA kernel in the llama.cpp fork, so GPU runs fall back to CPU matmul. Use the Q4_0-lossless pack (same {-1,0,1} weights, lossless 4-bit) for real GPU acceleration.",
+    "huggingface_repo": "Minarut/Ternary-Bonsai-8B-GGUF-llamacpp-compatible",
+    "huggingface_file": "Ternary-Bonsai-8B-Q4_0-lossless.gguf",
+    "local_path": "models/standard/Ternary-Bonsai-8B-Q4_0-lossless.gguf",
+    "download": "bash download-model.sh Q4_0-lossless"
+  },
   "inference": {
     "context_size": 8192,
     "max_predict": 64,

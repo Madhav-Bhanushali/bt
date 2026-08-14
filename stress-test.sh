@@ -40,7 +40,7 @@ MODEL_KEY=ternary-8b
 LLAMA_SERVER="${LLAMA_SERVER:-}"
 RESULTS="$ROOT/stress_results.txt"
 
-MODEL_PATH="standard/Ternary-Bonsai-8B-TQ2_0.gguf"
+MODEL_PATH="standard/Ternary-Bonsai-8B-Q4_0-lossless.gguf"
 
 STOP_JSON='["<|im_end|>", "<|im_start|>user", "\nuser\n", "\nassistant\n"]'
 CHAT_KWARGS='{"enable_thinking": false}'
@@ -53,6 +53,7 @@ usage() {
     sed -n 's/^# \{0,1\}//p' "${BASH_SOURCE[0]}" | head -n 22
     echo
     echo "Options:"
+    echo "  --model PATH           model file relative to models/ (default: $MODEL_PATH)"
     echo "  --levels \"1 2 4 8\"     concurrency levels to sweep (default: $LEVELS)"
     echo "  --rounds N            concurrent rounds per level (default: $ROUNDS)"
     echo "  --parallel auto|N     llama-server slots (default: auto = from free VRAM)"
@@ -73,6 +74,7 @@ usage() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --levels) LEVELS="$2"; shift 2 ;;
+        --model) MODEL_PATH="$2"; shift 2 ;;
         --rounds) ROUNDS="$2"; shift 2 ;;
         --parallel) PARALLEL="$2"; shift 2 ;;
         --ctx) CTX="$2"; shift 2 ;;
