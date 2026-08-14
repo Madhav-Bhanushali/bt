@@ -343,19 +343,18 @@ fi
 echo "Server ready (pid $SERVER_PID). Starting load..."
 cp "$SERVER_LOG" "$ROOT/stress_server.log" 2>/dev/null || true
 if [[ "$USE_GPU_RUN" -eq 1 ]]; then
-    echo "--- GPU status ---"
-    grep -iE "offloaded|ggml_cuda_init|compute device|VRAM|cuda|no kernel|error|tensor" "$SERVER_LOG" | head -n 12 || true
-    if ! grep -qiE "offloaded .* layer.* (to )?gpu|ggml_cuda_init|compute device" "$SERVER_LOG"; then
-        echo
-        echo "WARNING: no GPU offload detected in the server log."
-        echo "Persistent log saved to: $ROOT/stress_server.log"
-        echo "--- last 25 lines of server log ---"
-        tail -n 25 "$SERVER_LOG"
-        echo "-------------------------------------"
-        echo
-        echo "The binary is either CPU-only or this ternary quantization (TQ2_0) has"
-        echo "no CUDA kernel. If you see 'no kernel to perform computation on device',"
-        echo "GPU offload is not possible for this model on this build."
+    # Confirm GPU usage via nvidia-smi (this fork's server does not print the
+    # usual "offloaded N/M layers" lines, so the log is not a reliable signal).
+    gpumem="$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2>/dev/null \
+        | awk -F', ' -v p="$SERVER_PID" '$1==p {print $2}')"
+    if [[ -z "$gpumem" ]]; then
+        gpumem="$(nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv,noheader,nounits 2>/dev/null \
+            | grep -i 'llama-server' | head -n 1)"
+    fi
+    if [[ -n "$gpumem" ]]; then
+        echo "GPU confirmed: llama-server holds VRAM ($gpumem MiB)."
+    else
+        echo "WARNING: llama-server is not holding VRAM - the model is running on CPU."
     fi
 fi
 echo
