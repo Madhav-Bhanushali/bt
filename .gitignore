@@ -3,3 +3,4 @@
 models/**/*.gguf
 stress_results.txt
 benchmark_results.txt
+stress_server.log
