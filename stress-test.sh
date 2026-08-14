@@ -412,12 +412,14 @@ send_one() {
 
 fire_level() {
     local level="$1" rounds="$2" outdir="$3"
-    local r i
+    local r i pids=()
     for ((r=1; r<=rounds; r++)); do
+        pids=()
         for ((i=1; i<=level; i++)); do
             send_one "$outdir/r${r}_${i}.json" "$outdir/r${r}_${i}.meta" &
+            pids+=("$!")
         done
-        wait
+        wait "${pids[@]}"
     done
 }
 
@@ -541,11 +543,13 @@ if [[ "$SUSTAIN" -gt 0 ]]; then
     end="$(( $(date +%s) + SUSTAIN ))"
     n=0
     while [[ "$(date +%s)" -lt "$end" ]]; do
+        pids=()
         for ((i=1; i<=best; i++)); do
             send_one "$outdir/s${n}_${i}.json" "$outdir/s${n}_${i}.meta" &
+            pids+=("$!")
         done
         n=$((n+1))
-        wait
+        wait "${pids[@]}"
     done
     wall="$(python3 -c "import time; print(time.time()-$t0)")"
     echo "SUSTAINED at concurrency $best for ~${SUSTAIN}s"
