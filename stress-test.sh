@@ -296,11 +296,14 @@ trap '[[ -n "${SERVER_PID:-}" ]] && kill "$SERVER_PID" 2>/dev/null; rm -rf "$TMP
 wait_server_ready() {
     local i
     for ((i=0; i<120; i++)); do
-        if curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+        if curl -sf --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
             return 0
         fi
         if ! kill -0 "$SERVER_PID" 2>/dev/null; then
             return 1
+        fi
+        if (( i % 20 == 10 )); then
+            echo "  waiting for server... last log: $(tail -n 1 "$SERVER_LOG" 2>/dev/null)"
         fi
         sleep 0.5
     done
