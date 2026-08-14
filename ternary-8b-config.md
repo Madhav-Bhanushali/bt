@@ -22,9 +22,12 @@ See [`ternary-8b-config.json`](ternary-8b-config.json) for the full config: Hugg
 
 ```bash
 bash download-model.sh Q4_0-lossless
-LLAMA_SERVER=/home/ubuntu/falcon3/ser/ser/final/build_cuda/bin/llama-server bash stress-test.sh   # defaults to Q4_0-lossless now
+bash build-modern-llama-cpp.sh          # upstream llama.cpp (2026 kernels) - faster under load
+LLAMA_SERVER=/home/ubuntu/llama.cpp/build_cuda/bin/llama-server bash stress-test.sh
 # or explicitly: bash stress-test.sh --model standard/Ternary-Bonsai-8B-Q4_0-lossless.gguf
 ```
+
+> **Speed reality on the A10G:** 8B Q4_0 single-stream generation is **memory-bandwidth bound** at ~88 tok/s (both the 2025 BitNet fork and modern llama.cpp hit the same number). That puts a hard ~0.55s floor on each 64-token reply (predict=64). Throughput under load: ~6 req/s at 32 concurrent, 100% success. The modern build is kept because it handles concurrency slightly better.
 
 ## Repo layout (ternary model focus)
 
