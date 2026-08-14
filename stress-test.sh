@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Ternary Bonsai 8B - concurrency / latency stress test
+# Ternary Bonsai 8B - concurrency / latency stress test (GPU-aware)
 #
-# Launches llama-server for the ternary model and measures how many concurrent
-# requests it can handle, with latency percentiles, TTFT, tok/s and error
-# rate. Sweeps a range of concurrency levels, then optionally runs a sustained
-# soak at the highest fully-successful concurrency.
+# Auto-detects the GPU (nvidia-smi), offloads the model to it (-ngl), enables
+# flash attention, sizes the number of parallel slots from free VRAM, and uses
+# all CPU threads for prompt prefill. Falls back to CPU-only if the build
+# cannot offload the model. Sweeps concurrency levels, then optionally runs a
+# sustained soak at the highest fully-successful concurrency.
 #
 #   bash stress-test.sh [--levels "1 2 4 8 16 32"] [--rounds 3]
-#                      [--parallel 4] [--ctx 8192] [--predict 64]
+#                      [--parallel auto|N] [--ctx 8192] [--predict 64]
+#                      [--gpu N] [--flash-attn|--no-flash-attn]
 #                      [--sustain 60] [--port 8090] [--timeout 120]
-#                      [--no-cache-prompt]
+#                      [--no-gpu] [--dry-run] [--no-cache-prompt]
 #
 # The model and llama-server are resolved the same way as test.sh: this repo's
-# own build/models first, then an ancestor or sibling "final" repo
-# (e.g. ser/ser/bt/bt -> ser/ser/final).
+# own build/models first, then an ancestor or sibling "final" repo.
 # ============================================================================
 
 set -uo pipefail
@@ -24,13 +25,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --- defaults ---------------------------------------------------------------
 LEVELS="1 2 4 8 16 32"
 ROUNDS=3
-PARALLEL=4
+PARALLEL=auto              # auto = sized from free VRAM (or 4 on CPU)
 CTX=8192
 PREDICT=64
 SUSTAIN=0
 PORT=8090
 REQUEST_TIMEOUT=120
 CACHE_PROMPT=1
+NGL=999                    # offload as many layers as possible
+FLASH_ATTN=1
+USE_GPU=auto               # auto = use GPU if detected
+DRY_RUN=0
 MODEL_KEY=ternary-8b
 LLAMA_SERVER="${LLAMA_SERVER:-}"
 RESULTS="$ROOT/stress_results.txt"
@@ -40,19 +45,27 @@ MODEL_PATH="standard/Ternary-Bonsai-8B-TQ2_0.gguf"
 STOP_JSON='["<|im_end|>", "<|im_start|>user", "\nuser\n", "\nassistant\n"]'
 CHAT_KWARGS='{"enable_thinking": false}'
 
+# Ternary Bonsai (qwen3-8b-style): 36 layers, 8 KV heads, head_dim 128.
+# KV cache per token (f16) = 2 * n_layer * n_head_kv * head_dim * 2 bytes.
+KV_BYTES_PER_TOKEN=$((2 * 36 * 8 * 128 * 2))   # 147456
+
 usage() {
-    sed -n 's/^# \{0,1\}//p' "${BASH_SOURCE[0]}" | head -n 20
+    sed -n 's/^# \{0,1\}//p' "${BASH_SOURCE[0]}" | head -n 22
     echo
     echo "Options:"
     echo "  --levels \"1 2 4 8\"     concurrency levels to sweep (default: $LEVELS)"
     echo "  --rounds N            concurrent rounds per level (default: $ROUNDS)"
-    echo "  --parallel N          llama-server slots (default: $PARALLEL; each slot"
-    echo "                        reserves a full ctx KV cache, mind your RAM)"
-    echo "  --ctx N               context size (default: $CTX)"
+    echo "  --parallel auto|N     llama-server slots (default: auto = from free VRAM)"
+    echo "  --ctx N               context size (default: $CTX; smaller = more slots)"
     echo "  --predict N           max output tokens (default: $PREDICT)"
+    echo "  --gpu N               layers to offload (default: $NGL = all possible)"
+    echo "  --flash-attn/--no-flash-attn"
+    echo "                        CUDA flash attention (default: on)"
     echo "  --sustain SECONDS     soak at best concurrency (default: off)"
     echo "  --port P              server port (default: $PORT)"
     echo "  --timeout SECONDS     per-request max (default: $REQUEST_TIMEOUT)"
+    echo "  --no-gpu              force CPU-only run"
+    echo "  --dry-run             print detected hardware + recommended settings"
     echo "  --no-cache-prompt     disable prompt-prefix KV reuse"
     echo "  --threads N           override auto thread count"
 }
@@ -64,10 +77,15 @@ while [[ $# -gt 0 ]]; do
         --parallel) PARALLEL="$2"; shift 2 ;;
         --ctx) CTX="$2"; shift 2 ;;
         --predict) PREDICT="$2"; shift 2 ;;
+        --gpu) NGL="$2"; shift 2 ;;
+        --flash-attn) FLASH_ATTN=1; shift ;;
+        --no-flash-attn) FLASH_ATTN=0; shift ;;
         --sustain) SUSTAIN="$2"; shift 2 ;;
         --port) PORT="$2"; shift 2 ;;
         --timeout) REQUEST_TIMEOUT="$2"; shift 2 ;;
         --threads) THREADS="$2"; shift 2 ;;
+        --no-gpu) USE_GPU=no; shift ;;
+        --dry-run) DRY_RUN=1; shift ;;
         --no-cache-prompt) CACHE_PROMPT=0; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1"; usage; exit 1 ;;
@@ -145,6 +163,31 @@ find_model() {
     return 1
 }
 
+# --- GPU detection ----------------------------------------------------------
+# Returns "NAME|TOTAL_MIB|FREE_MIB" for the first GPU, empty if none.
+detect_gpu() {
+    command -v nvidia-smi >/dev/null 2>&1 || { echo ""; return 1; }
+    local line
+    line="$(nvidia-smi --query-gpu=name,memory.total,memory.free \
+        --format=csv,noheader,nounits 2>/dev/null | head -n 1)" || { echo ""; return 1; }
+    echo "$line"
+}
+
+# Suggested slot count from free VRAM, leaving ~3 GiB for the model + overhead.
+slots_from_vram() {
+    local free_mib="$1"
+    local kv_bytes
+    kv_bytes=$((KV_BYTES_PER_TOKEN * CTX))
+    python3 -c "
+import sys, math
+free_mib, kv = float(sys.argv[1]), float(sys.argv[2])
+free_gib = free_mib / 1024.0 - 3.0        # reserve model + headroom
+slots = math.floor(free_gib * 1073741824 / kv) if kv > 0 else 0
+print(max(1, int(slots * 0.8)))           # 20% safety margin
+" "$free_mib" "$kv_bytes"
+}
+
+# --- resolve binary / model / hardware --------------------------------------
 if [[ -z "$LLAMA_SERVER" ]]; then
     LLAMA_SERVER="$(find_llama_server)" || {
         echo "ERROR: llama-server not found. Set LLAMA_SERVER=/path/to/llama-server"
@@ -164,6 +207,48 @@ MODEL="$(find_model)" || {
 
 if [[ -z "${THREADS:-}" ]]; then
     THREADS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4)"
+fi
+
+GPU_LINE="$(detect_gpu)"
+GPU_NAME=""; GPU_TOTAL_MIB=""; GPU_FREE_MIB=""
+if [[ -n "$GPU_LINE" ]]; then
+    GPU_NAME="${GPU_LINE%%|*}"
+    GPU_TOTAL_MIB="$(echo "$GPU_LINE" | cut -d'|' -f2)"
+    GPU_FREE_MIB="$(echo "$GPU_LINE" | cut -d'|' -f3)"
+fi
+
+# Parallel slots: explicit, auto-from-VRAM (GPU), or CPU default of 4.
+if [[ "$PARALLEL" == "auto" ]]; then
+    if [[ "$USE_GPU" != "no" && -n "$GPU_FREE_MIB" ]]; then
+        PARALLEL="$(slots_from_vram "$GPU_FREE_MIB")"
+    else
+        PARALLEL=4
+    fi
+fi
+
+USE_GPU_RUN=0
+if [[ "$USE_GPU" != "no" && -n "$GPU_NAME" ]]; then
+    USE_GPU_RUN=1
+fi
+
+echo "============================================================"
+echo "TERNARY BONSAI 8B - CONCURRENCY / LATENCY STRESS TEST"
+echo "============================================================"
+echo "Model      : $MODEL"
+echo "llama-srv  : $LLAMA_SERVER"
+echo "GPU        : ${GPU_NAME:-none}  (total ${GPU_TOTAL_MIB:-0} MiB, free ${GPU_FREE_MIB:-0} MiB)"
+echo "Offload    : $([ "$USE_GPU_RUN" -eq 1 ] && echo "yes (-ngl $NGL)" || echo "no (CPU)")"
+echo "Flash attn : $([ "$FLASH_ATTN" -eq 1 ] && echo yes || echo no)"
+echo "KV/slot    : $((KV_BYTES_PER_TOKEN * CTX / 1048576)) MiB at ctx $CTX"
+echo "Threads    : $THREADS | Parallel slots: $PARALLEL | predict: $PREDICT"
+echo "Levels     : $LEVELS | rounds/level: $ROUNDS | cache_prompt: $CACHE_PROMPT"
+echo "Port       : $PORT | req timeout: ${REQUEST_TIMEOUT}s | sustain: ${SUSTAIN}s"
+echo
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "DRY RUN - no server started. Recommended settings above."
+    echo "Next: bash stress-test.sh $*"
+    exit 0
 fi
 
 # --- build request body -----------------------------------------------------
@@ -186,59 +271,87 @@ BODY="$(jq -n \
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/stress.XXXXXX")"
 trap '[[ -n "${SERVER_PID:-}" ]] && kill "$SERVER_PID" 2>/dev/null; rm -rf "$TMP_DIR"' EXIT
 
-# --- start server -----------------------------------------------------------
-echo "============================================================"
-echo "TERNARY BONSAI 8B - CONCURRENCY / LATENCY STRESS TEST"
-echo "============================================================"
-echo "Model     : $MODEL"
-echo "llama-srv : $LLAMA_SERVER"
-echo "Threads   : $THREADS | Parallel slots: $PARALLEL | ctx: $CTX | predict: $PREDICT"
-echo "Levels    : $LEVELS | rounds/level: $ROUNDS | cache_prompt: $CACHE_PROMPT"
-echo "Port      : $PORT | req timeout: ${REQUEST_TIMEOUT}s | sustain: ${SUSTAIN}s"
-echo
+# --- server start (GPU first, CPU fallback) ---------------------------------
+wait_server_ready() {
+    local i
+    for ((i=0; i<600; i++)); do
+        if curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
+GPU_FLAGS=()
+if [[ "$USE_GPU_RUN" -eq 1 ]]; then
+    GPU_FLAGS=(-ngl "$NGL")
+    [[ "$FLASH_ATTN" -eq 1 ]] && GPU_FLAGS+=(-fa)
+fi
+
+start_server() {
+    local log="$1"
+    "$LLAMA_SERVER" \
+        -m "$MODEL" \
+        -c "$CTX" \
+        -t "$THREADS" \
+        -tb "$THREADS" \
+        -b 4096 -ub 2048 \
+        --port "$PORT" \
+        --host 127.0.0.1 \
+        --no-webui \
+        --temp 0.2 \
+        --seed 42 \
+        --parallel "$PARALLEL" \
+        "${GPU_FLAGS[@]}" \
+        >"$log" 2>&1 &
+    SERVER_PID=$!
+    if wait_server_ready; then
+        return 0
+    fi
+    kill "$SERVER_PID" 2>/dev/null
+    wait "$SERVER_PID" 2>/dev/null
+    return 1
+}
 
 SERVER_LOG="$TMP_DIR/server.log"
-"$LLAMA_SERVER" \
-    -m "$MODEL" \
-    -c "$CTX" \
-    -t "$THREADS" \
-    -tb "$THREADS" \
-    -b 4096 -ub 2048 \
-    --port "$PORT" \
-    --host 127.0.0.1 \
-    --no-webui \
-    --temp 0.2 \
-    --seed 42 \
-    --parallel "$PARALLEL" \
-    >"$SERVER_LOG" 2>&1 &
-SERVER_PID=$!
-
-ready=0
-for ((i=0; i<600; i++)); do
-    if curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-        ready=1
-        break
+if [[ "$USE_GPU_RUN" -eq 1 ]]; then
+    echo "Starting server with GPU offload (-ngl $NGL)..."
+    if ! start_server "$SERVER_LOG"; then
+        echo "WARNING: GPU start failed - falling back to CPU-only (ngl 0)."
+        GPU_FLAGS=(-ngl 0)
+        PARALLEL=4
+        [[ "$FLASH_ATTN" -eq 1 ]] && GPU_FLAGS+=(-fa)
+        USE_GPU_RUN=0
+        if ! start_server "$SERVER_LOG"; then
+            echo "ERROR: server did not become ready."
+            tail -n 30 "$SERVER_LOG"
+            exit 1
+        fi
     fi
-    sleep 0.5
-done
-if [[ "$ready" -ne 1 ]]; then
-    echo "ERROR: server did not become ready (pid $SERVER_PID)"
-    tail -n 30 "$SERVER_LOG"
-    exit 1
+else
+    if ! start_server "$SERVER_LOG"; then
+        echo "ERROR: server did not become ready."
+        tail -n 30 "$SERVER_LOG"
+        exit 1
+    fi
 fi
 echo "Server ready (pid $SERVER_PID). Starting load..."
+if [[ "$USE_GPU_RUN" -eq 1 ]]; then
+    grep -iE "offload|device" "$SERVER_LOG" | head -n 8
+fi
 echo
 
 # --- request firing ---------------------------------------------------------
 send_one() {
-    local out="$1" mf="$2" port="$3"
+    local out="$1" mf="$2"
     local meta
     meta="$(curl -s -o "$out" \
         -w '%{http_code}|%{time_total}' \
         --max-time "$REQUEST_TIMEOUT" \
         -H 'Content-Type: application/json' \
         -d "$BODY" \
-        "http://127.0.0.1:$port/v1/chat/completions" 2>/dev/null || true)"
+        "http://127.0.0.1:$PORT/v1/chat/completions" 2>/dev/null || true)"
     printf '%s' "$meta" > "$mf"
 }
 
@@ -247,13 +360,13 @@ fire_level() {
     local r i
     for ((r=1; r<=rounds; r++)); do
         for ((i=1; i<=level; i++)); do
-            send_one "$outdir/r${r}_${i}.json" "$outdir/r${r}_${i}.meta" "$PORT" &
+            send_one "$outdir/r${r}_${i}.json" "$outdir/r${r}_${i}.meta" &
         done
         wait
     done
 }
 
-# --- aggregation ------------------------------------------------------------
+# --- aggregation (one line + detail block) ----------------------------------
 aggregate() {
     # $1 = outdir, $2 = wall seconds
     python3 - "$1" "$2" <<'PY'
@@ -279,7 +392,6 @@ ok = [r for r in rows if r[0] == "200"]
 n = len(rows)
 lat = sorted(r[1] for r in ok)
 ttft = sorted((r[2] or 0.0)/1000.0 for r in ok if r[2] is not None)
-gen = sorted((r[3] or 0.0)/1000.0 for r in ok if r[3] is not None)
 tokps = sorted((r[5]/(r[3]/1000.0) if r[3] else 0.0) for r in ok if r[5] and r[3])
 queue = sorted(r[1] - ((r[2] or 0)+(r[3] or 0))/1000.0 for r in ok if (r[2] or 0)+(r[3] or 0) > 0)
 
@@ -292,34 +404,32 @@ for r in rows:
     if r[0] != "200":
         errs[r[0]] = errs.get(r[0], 0) + 1
 
-print(f"  requests  : {n}  (ok {len(ok)}, failed {n-len(ok)}, success {100.0*len(ok)/n if n else 0:.0f}%)")
 if ok:
-    print(f"  throughput: {len(ok)/wall if wall else 0:.2f} req/s")
-    print(f"  latency   : p50 {pct(lat,50)*1000:.0f}ms  p95 {pct(lat,95)*1000:.0f}ms  p99 {pct(lat,99)*1000:.0f}ms")
+    print(f"  ok {len(ok)}/{n}  success {100.0*len(ok)/n if n else 0:.0f}%  "
+          f"{len(ok)/wall if wall else 0:.2f} req/s  "
+          f"lat p50 {pct(lat,50)*1000:.0f}ms  p95 {pct(lat,95)*1000:.0f}ms  p99 {pct(lat,99)*1000:.0f}ms")
     if ttft:
-        print(f"  TTFT      : p50 {pct(ttft,50)*1000:.0f}ms  p95 {pct(ttft,95)*1000:.0f}ms")
+        print(f"  TTFT      p50 {pct(ttft,50)*1000:.0f}ms  p95 {pct(ttft,95)*1000:.0f}ms")
     if tokps:
-        print(f"  gen speed : {statistics.median(tokps):.1f} tok/s (median), {pct(tokps,95):.1f} tok/s p95")
+        print(f"  gen       {statistics.median(tokps):.1f} tok/s median  {pct(tokps,95):.1f} p95")
     if queue:
-        print(f"  queue wait: p50 {pct(queue,50)*1000:.0f}ms  p99 {pct(queue,99)*1000:.0f}ms")
+        print(f"  queue     p50 {pct(queue,50)*1000:.0f}ms  p99 {pct(queue,99)*1000:.0f}ms")
+else:
+    print(f"  ok 0/{n}  all failed")
 if errs:
-    print(f"  errors    : " + ", ".join(f"HTTP {k} x {v}" for k, v in sorted(errs.items())))
-print(f"  wall      : {wall:.1f}s")
+    print(f"  errors    " + ", ".join(f"HTTP {k} x {v}" for k, v in sorted(errs.items())))
+print(f"  wall      {wall:.1f}s")
 PY
 }
 
 # --- run the sweep ----------------------------------------------------------
-printf '%-6s %-10s %-10s %-12s %-8s\n' "Conc" "ok/fail" "req/s" "lat p50/p95" "fail"
-echo "--------------------------------------------------------------------------"
-: > "$RESULTS"
 {
     echo "Ternary Bonsai 8B - stress results"
     echo "Model: $MODEL"
     echo "Server: $LLAMA_SERVER | threads $THREADS | parallel $PARALLEL | ctx $CTX | predict $PREDICT"
+    echo "GPU: ${GPU_NAME:-none} | offload: $([ "$USE_GPU_RUN" -eq 1 ] && echo "-ngl $NGL" || echo CPU) | flash-attn: $([ "$FLASH_ATTN" -eq 1 ] && echo yes || echo no)"
     echo "Rounds/level: $ROUNDS | cache_prompt: $CACHE_PROMPT | req timeout: ${REQUEST_TIMEOUT}s"
     echo
-    echo "Concurrency | requests | ok/fail | success% | req/s | lat p50/p95ms | TTFT p50ms | gen tok/s | queue p50ms"
-    echo "------------+----------+---------+----------+-------+--------------+-------------+-----------+------------"
 } >> "$RESULTS"
 
 best=1
@@ -330,20 +440,19 @@ for level in $LEVELS; do
     fire_level "$level" "$ROUNDS" "$outdir"
     wall="$(python3 -c "import time; print(time.time()-$t0)")"
 
-    # quick fail count for the table row
     fail=0; ok=0
     for mf in "$outdir"/*.meta; do
-        c="$(cat "$mf")"
-        c="${c%%|*}"
+        c="$(cat "$mf")"; c="${c%%|*}"
         if [[ "$c" == "200" ]]; then ok=$((ok+1)); else fail=$((fail+1)); fi
     done
     if [[ "$fail" -eq 0 ]]; then best="$level"; fi
-    printf '%-6s %-10s ' "$level" "$ok/$fail"
 
-    line="$(aggregate "$outdir" "$wall")"
-    echo "$line" | tail -n +2
+    echo "Concurrency $level  ($((level * ROUNDS)) requests, $ok ok / $fail failed)"
+    aggregate "$outdir" "$wall"
     {
-        echo "$line" | tail -n +2
+        echo
+        echo "Concurrency $level  ($((level * ROUNDS)) requests, $ok ok / $fail failed)"
+        aggregate "$outdir" "$wall"
     } >> "$RESULTS"
     echo
 done
@@ -360,16 +469,17 @@ if [[ "$SUSTAIN" -gt 0 ]]; then
     n=0
     while [[ "$(date +%s)" -lt "$end" ]]; do
         for ((i=1; i<=best; i++)); do
-            send_one "$outdir/s${n}_${i}.json" "$outdir/s${n}_${i}.meta" "$PORT" &
+            send_one "$outdir/s${n}_${i}.json" "$outdir/s${n}_${i}.meta" &
         done
         n=$((n+1))
         wait
     done
     wall="$(python3 -c "import time; print(time.time()-$t0)")"
+    echo "SUSTAINED at concurrency $best for ~${SUSTAIN}s"
     aggregate "$outdir" "$wall"
     {
         echo
-        echo "SUSTAINED at concurrency $best for ~${SUSTAIN}s:"
+        echo "SUSTAINED at concurrency $best for ~${SUSTAIN}s"
         aggregate "$outdir" "$wall"
     } >> "$RESULTS"
     echo
