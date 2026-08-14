@@ -300,10 +300,22 @@ resolve_llama_server() {
         "$ROOT/build_server/bin/Release/llama-server"
         "$ROOT/build/bin/Release/llama-server"
     )
-    local c
+    # When this harness lives in a copied repo (e.g. the bt repo) next to the
+    # BitNet source repo it was extracted from, reuse that repo's build binary.
+    local src c
+    for src in "$ROOT/../final" "$ROOT/.."; do
+        local real_src
+        real_src="$(cd "$src" 2>/dev/null && pwd)" || continue
+        candidates+=(
+            "$real_src/build_server/bin/llama-server"
+            "$real_src/build/bin/llama-server"
+            "$real_src/build_server/bin/Release/llama-server"
+            "$real_src/build/bin/Release/llama-server"
+        )
+    done
     for c in "${candidates[@]}"; do
-        if [[ -x "$c" ]]; then
-            echo "$c"
+        if [[ -x "$c" ]] || [[ -x "$c.exe" ]]; then
+            [[ -x "$c" ]] && echo "$c" || echo "$c.exe"
             return 0
         fi
     done
@@ -315,13 +327,25 @@ build_llama_server() {
     echo "Building llama-server (this can take a few minutes)..."
     echo
 
+    # Source root: this repo if it has CMakeLists.txt, otherwise a sibling
+    # BitNet source repo (e.g. the final repo that this harness was copied from).
     local src="$ROOT"
     if [[ ! -f "$ROOT/CMakeLists.txt" ]]; then
-        echo "ERROR: repo root with CMakeLists.txt not found at $ROOT"
+        local cand real_src
+        for cand in "$ROOT/../final" "$ROOT/.."; do
+            if real_src="$(cd "$cand" 2>/dev/null && pwd)" && [[ -f "$real_src/CMakeLists.txt" ]]; then
+                src="$real_src"
+                break
+            fi
+        done
+    fi
+    if [[ ! -f "$src/CMakeLists.txt" ]]; then
+        echo "ERROR: no BitNet source (CMakeLists.txt) at $ROOT or in sibling repos."
+        echo "Point LLAMA_SERVER=/path/to/llama-server at an existing binary and re-run."
         return 1
     fi
 
-    local bdir="$ROOT/build_server"
+    local bdir="$src/build_server"
     local nproc_val
     nproc_val="$(nproc 2>/dev/null || echo 4)"
 
