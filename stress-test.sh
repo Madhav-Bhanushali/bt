@@ -3,7 +3,7 @@
 # Ternary Bonsai 8B - concurrency / latency stress test (GPU-aware)
 #
 # Auto-detects the GPU (nvidia-smi), offloads the model to it (-ngl), enables
-# flash attention, sizes the number of parallel slots from free VRAM, and uses
+# flash attention, sizes the number of parallel slots from context/prompt budget, and uses
 # all CPU threads for prompt prefill. Falls back to CPU-only if the build
 # cannot offload the model. Sweeps concurrency levels, then optionally runs a
 # sustained soak at the highest fully-successful concurrency.
@@ -25,7 +25,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --- defaults ---------------------------------------------------------------
 LEVELS="1 2 4 8 16 32"
 ROUNDS=3
-PARALLEL=auto              # auto = sized from free VRAM (or 4 on CPU)
+PARALLEL=auto              # auto = sized from context/prompt budget (or 4 on CPU)
 CTX=8192
 PREDICT=64
 SUSTAIN=0
@@ -56,7 +56,7 @@ usage() {
     echo "  --model PATH           model file relative to models/ (default: $MODEL_PATH)"
     echo "  --levels \"1 2 4 8\"     concurrency levels to sweep (default: $LEVELS)"
     echo "  --rounds N            concurrent rounds per level (default: $ROUNDS)"
-    echo "  --parallel auto|N     llama-server slots (default: auto = from free VRAM)"
+    echo "  --parallel auto|N     llama-server slots (default: auto = from context/prompt budget)"
     echo "  --ctx N               context size (default: $CTX; smaller = more slots)"
     echo "  --predict N           max output tokens (default: $PREDICT)"
     echo "  --gpu N               layers to offload (default: $NGL = all possible)"
@@ -179,18 +179,18 @@ detect_gpu() {
     echo "$name|$total|$free"
 }
 
-# Suggested slot count from free VRAM, leaving ~3 GiB for the model + overhead.
-slots_from_vram() {
-    local free_mib="$1"
-    local kv_bytes
-    kv_bytes=$((KV_BYTES_PER_TOKEN * CTX))
-    python3 -c "
-import sys, math
-free_mib, kv = float(sys.argv[1]), float(sys.argv[2])
-free_gib = free_mib / 1024.0 - 3.0        # reserve model + headroom
-slots = math.floor(free_gib * 1073741824 / kv) if kv > 0 else 0
-print(max(1, int(slots * 0.8)))           # 20% safety margin
-" "$free_mib" "$kv_bytes"
+# Suggested parallel slot count.
+# Total KV cache = CTX * KV_BYTES_PER_TOKEN regardless of slot count (the server
+# splits -c CTX across slots), so slots do NOT multiply VRAM use. Instead we size
+# slots so each slot keeps enough context for the prompt + predict (capped at 32).
+auto_parallel() {
+    local nchars="${#SYSTEM_PROMPT}"
+    local est_tokens=$(( nchars / 3 + 40 ))       # rough tokens incl. user message
+    local slot_ctx=$(( est_tokens + PREDICT + 64 ))
+    local p=$(( CTX / slot_ctx ))
+    (( p < 1 )) && p=1
+    (( p > 32 )) && p=32
+    echo "$p"
 }
 
 # --- resolve binary / model / hardware --------------------------------------
@@ -223,10 +223,10 @@ if [[ -n "$GPU_LINE" ]]; then
     GPU_FREE_MIB="$(echo "$GPU_LINE" | cut -d'|' -f3)"
 fi
 
-# Parallel slots: explicit, auto-from-VRAM (GPU), or CPU default of 4.
+# Parallel slots: explicit, auto-from-ctx-budget (GPU), or CPU default of 4.
 if [[ "$PARALLEL" == "auto" ]]; then
     if [[ "$USE_GPU" != "no" && -n "$GPU_FREE_MIB" ]]; then
-        PARALLEL="$(slots_from_vram "$GPU_FREE_MIB")"
+        PARALLEL="$(auto_parallel)"
     else
         PARALLEL=4
     fi
@@ -245,19 +245,20 @@ echo "llama-srv  : $LLAMA_SERVER"
 echo "GPU        : ${GPU_NAME:-none}  (total ${GPU_TOTAL_MIB:-0} MiB, free ${GPU_FREE_MIB:-0} MiB)"
 echo "Offload    : $([ "$USE_GPU_RUN" -eq 1 ] && echo "yes (-ngl $NGL)" || echo "no (CPU)")"
 echo "Flash attn : $([ "$FLASH_ATTN" -eq 1 ] && echo yes || echo no)"
-echo "KV/slot    : $((KV_BYTES_PER_TOKEN * CTX / 1048576)) MiB at ctx $CTX"
+echo "Total KV  : $((KV_BYTES_PER_TOKEN * CTX / 1048576)) MiB at ctx $CTX (~$((CTX / PARALLEL)) tokens/slot)"
 echo "Threads    : $THREADS | Parallel slots: $PARALLEL | predict: $PREDICT"
 echo "Levels     : $LEVELS | rounds/level: $ROUNDS | cache_prompt: $CACHE_PROMPT"
 echo "Port       : $PORT | req timeout: ${REQUEST_TIMEOUT}s | sustain: ${SUSTAIN}s"
 echo
 
 # --- VRAM pre-flight --------------------------------------------------------
+# Total KV = CTX * bytes/token (fixed, split across slots), not per-slot.
 if [[ "$USE_GPU_RUN" -eq 1 ]]; then
     model_mib="$(stat -c%s "$MODEL" 2>/dev/null || echo 0)"
     model_mib=$((model_mib / 1048576))
-    kv_mib=$((PARALLEL * KV_BYTES_PER_TOKEN * CTX / 1048576))
-    need_mib=$((model_mib + kv_mib))
-    echo "VRAM need : ~${need_mib} MiB (model ${model_mib} + ${PARALLEL}x KV ${kv_mib})"
+    total_kv_mib=$((KV_BYTES_PER_TOKEN * CTX / 1048576))
+    need_mib=$((model_mib + total_kv_mib + 1024))
+    echo "VRAM need : ~${need_mib} MiB (model ${model_mib} + total KV ${total_kv_mib} + 1 GiB headroom)"
     if [[ "$need_mib" -gt $((GPU_FREE_MIB + 256)) ]]; then
         echo
         echo "ERROR: not enough free VRAM (${GPU_FREE_MIB} MiB free, need ~${need_mib} MiB)."
