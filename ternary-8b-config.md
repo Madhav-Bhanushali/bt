@@ -16,11 +16,23 @@ See [`ternary-8b-config.json`](ternary-8b-config.json) for the full config: Hugg
 | Thinking | disabled via `chat_template_kwargs: {"enable_thinking": false}` |
 | Cache prompt | on (fast per-test prompt eval) |
 
-## Full model included locally
+## Repo layout (ternary model focus)
 
-The complete model binary is copied into this repo's working tree at
-`models/standard/Ternary-Bonsai-8B-TQ2_0.gguf` (2.0 GB). It is **not tracked by git**
-(see `.gitignore`) because GitHub rejects files over 100 MB; re-download it any time from
-`Minarut/Ternary-Bonsai-8B-GGUF-llamacpp-compatible`.
+| Path | Purpose |
+|---|---|
+| `test.sh` | benchmark harness (runs `--model ternary-8b` and others) |
+| `sp.txt` | system prompt loaded by `test.sh` |
+| `download-model.sh` | downloads the 2.0 GB GGUF into `models/standard/` |
+| `ternary-8b-config.json` | full model config (source, inference, stop tokens, prompt) |
+
+## The model binary is downloaded, not committed
+
+GitHub rejects files over 100 MB, so the 2.0 GB GGUF is **not in git**. Get it with:
+
+```bash
+bash download-model.sh        # or just: bash test.sh --model ternary-8b
+```
+
+Source: `Minarut/Ternary-Bonsai-8B-GGUF-llamacpp-compatible` → `Ternary-Bonsai-8B-TQ2_0.gguf`.
 
 > **Why TQ2_0 and not prism Q2_0:** the `prism-ml/Ternary-Bonsai-8B-gguf` `Q2_0.gguf` uses a custom g128 quantization that requires a forked llama.cpp and fails to load on plain builds (`tensor 'output_norm.weight' has offset ...`). The llamacpp-compatible `TQ2_0` pack loads cleanly.
