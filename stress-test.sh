@@ -167,10 +167,14 @@ find_model() {
 # Returns "NAME|TOTAL_MIB|FREE_MIB" for the first GPU, empty if none.
 detect_gpu() {
     command -v nvidia-smi >/dev/null 2>&1 || { echo ""; return 1; }
-    local line
+    local line name total free
     line="$(nvidia-smi --query-gpu=name,memory.total,memory.free \
         --format=csv,noheader,nounits 2>/dev/null | head -n 1)" || { echo ""; return 1; }
-    echo "$line"
+    [[ -n "$line" ]] || { echo ""; return 1; }
+    name="${line%%,*}"
+    total="$(printf '%s\n' "$line" | awk -F', ' '{print $2}')"
+    free="$(printf '%s\n' "$line" | awk -F', ' '{print $3}')"
+    echo "$name|$total|$free"
 }
 
 # Suggested slot count from free VRAM, leaving ~3 GiB for the model + overhead.
