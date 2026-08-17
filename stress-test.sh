@@ -26,7 +26,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LEVELS="1 2 4 8 16 32"
 ROUNDS=3
 PARALLEL=auto              # auto = sized from context/prompt budget (or 4 on CPU)
-CTX=8192
+CTX=16384                  # total context across slots (KV uses VRAM, so this
+                           # scales VRAM use + enables more concurrent slots)
 PREDICT=64
 SUSTAIN=0
 PORT=8090
@@ -188,15 +189,16 @@ detect_gpu() {
 # Suggested parallel slot count.
 # Total KV cache = CTX * KV_BYTES_PER_TOKEN regardless of slot count (the server
 # splits -c CTX across slots), so slots do NOT multiply VRAM use. Slots are sized
-# so each keeps enough context for the prompt + predict; capped at 12 to keep
-# per-request generation from being crushed by GPU sharing.
+# so each keeps enough context for the prompt + predict. On Blackwell-class GPUs
+# with lots of VRAM we run as many slots as the context budget allows (up to 32)
+# to maximize concurrent throughput.
 auto_parallel() {
     local nchars="${#SYSTEM_PROMPT}"
     local est_tokens=$(( nchars / 3 + 40 ))       # rough tokens incl. user message
     local slot_ctx=$(( est_tokens + PREDICT + 64 ))
     local p=$(( CTX / slot_ctx ))
     (( p < 1 )) && p=1
-    (( p > 12 )) && p=12
+    (( p > 32 )) && p=32
     echo "$p"
 }
 
