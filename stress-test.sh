@@ -501,6 +501,13 @@ PY
 } >> "$RESULTS"
 
 best=1
+# Warmup: absorb the first-request CUDA JIT / cold-start stall (can be 10s+)
+# so the sweep numbers are not polluted by a one-time outlier.
+echo "Warming up (first-request CUDA JIT can take seconds) ..."
+mkdir -p "$TMP_DIR/warmup"
+send_one "$TMP_DIR/warmup/w0.json" "$TMP_DIR/warmup/w0.meta"
+rm -rf "$TMP_DIR/warmup"
+echo "Warmup done."
 for level in $LEVELS; do
     outdir="$TMP_DIR/L$level"
     mkdir -p "$outdir"
