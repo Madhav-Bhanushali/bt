@@ -15,8 +15,20 @@ set -euo pipefail
 
 SRC="${1:-/home/ubuntu/llama.cpp}"
 BRANCH="${2:-master}"
-BUILD="$SRC/build_cuda"
 ARCH="${CUDA_ARCH:-native}"
+# Step-1 A/B: build the same source with different matmul dispatch policies.
+#   baseline  default dispatch (MMQ where it fits, else cuBLAS)      -> build_cuda
+#   cublas    force every matmul through cuBLAS (diagnostic)          -> build_cuda_cublas
+#   mmq       force MMQ kernels for quantized matmul (diagnostic)     -> build_cuda_mmq
+# NOTE: GGML_CUDA_FORCE_MMQ / FORCE_CUBLAS are COMPILE-TIME flags, not env vars.
+MODE="${MODE:-baseline}"
+case "$MODE" in
+    baseline) MODE_FLAGS="" ;                                BUILDDIR="build_cuda" ;;
+    cublas)   MODE_FLAGS="-DGGML_CUDA_FORCE_CUBLAS=ON" ;     BUILDDIR="build_cuda_cublas" ;;
+    mmq)      MODE_FLAGS="-DGGML_CUDA_FORCE_MMQ=ON" ;        BUILDDIR="build_cuda_mmq" ;;
+    *) echo "ERROR: unknown MODE='$MODE' (use baseline|cublas|mmq)"; exit 1 ;;
+esac
+BUILD="$SRC/$BUILDDIR"
 
 # --- build tools (cmake, g++, make) -----------------------------------------
 if ! command -v cmake >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
@@ -81,12 +93,13 @@ fi
 cmake -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
     -DGGML_CUDA=ON \
     -DCMAKE_CUDA_ARCHITECTURES="$ARCH" \
+    $MODE_FLAGS \
     -DLLAMA_CURL=OFF \
     -DLLAMA_NATIVE=ON
 cmake --build "$BUILD" --target llama-server -j"$(nproc)"
 
 echo
-echo "Done: $BUILD/bin/llama-server"
+echo "Done ($MODE): $BUILD/bin/llama-server"
 echo "Quick check (Q4_0-lossless):"
 echo "  timeout 30 $BUILD/bin/llama-server -m /home/ubuntu/falcon3/ser/ser/bt/bt/models/standard/Ternary-Bonsai-8B-Q4_0-lossless.gguf -ngl 999 -c 8192 --port 8095 --no-webui 2>&1 | grep -iE 'offload|cuda|model loaded'"
 echo "Stress test:"

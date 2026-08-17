@@ -167,6 +167,11 @@ find_llama_server() {
 
 find_model() {
     local root alt
+    # Absolute paths (or paths under the repo) are used verbatim.
+    [[ "${MODEL_PATH:0:1}" == "/" || "${MODEL_PATH:0:2}" == "./" || "${MODEL_PATH:0:2}" == "~/" ]] && {
+        [[ -f "$MODEL_PATH" ]] && { echo "$MODEL_PATH"; return 0; }
+        return 1
+    }
     while read -r root; do
         [[ -n "$root" ]] || continue
         alt="$root/models/$MODEL_PATH"
