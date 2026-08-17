@@ -18,6 +18,17 @@ BRANCH="${2:-master}"
 BUILD="$SRC/build_cuda"
 ARCH="${CUDA_ARCH:-native}"
 
+# --- build tools (cmake, g++, make) -----------------------------------------
+if ! command -v cmake >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
+    if [[ "$(id -u)" == "0" ]]; then
+        echo "Build tools missing - installing cmake + build-essential ..."
+        apt-get update -qq && apt-get install -y cmake build-essential ninja-build
+    else
+        echo "ERROR: cmake/g++ not found. Run (as root): apt install -y cmake build-essential"
+        exit 1
+    fi
+fi
+
 command -v nvcc >/dev/null 2>&1 || { echo "ERROR: CUDA toolkit not found (nvcc)"; exit 1; }
 echo "nvcc: $(nvcc --version | grep release)"
 echo "CUDA arch: $ARCH (set CUDA_ARCH=100 for Blackwell, 86 for A10G if native fails)"
