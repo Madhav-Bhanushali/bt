@@ -43,6 +43,37 @@ fi
 
 cd "$SRC"
 echo "Building upstream llama.cpp @ $(git rev-parse --short HEAD) ..."
+
+# --- Blackwell smpbo clamp patch (OPTIMIZATION_PLAN Step 1) ------------------
+# The NVIDIA driver bug (sharedMemPerBlockOptin -> 0 or 0x100000001 on Blackwell)
+# makes llama.cpp reject every MMQ tile config and silently fall back to slow
+# cuBLAS. No upstream clamp exists yet; apply ours. Disable with SMPBO_PATCH=0.
+# (Upstream PR #22338 fixed SOFT_MAX only; #26141 guards but still leaves the
+# batched path on cuBLAS for broken drivers.)
+if [[ "${SMPBO_PATCH:-1}" == "1" ]]; then
+    if ! python3 - <<'PY'
+import io
+p = "ggml/src/ggml-cuda/ggml-cuda.cu"
+s = io.open(p, encoding="utf-8").read()
+old = """        info.devices[id].smpbo = prop.sharedMemPerBlockOptin;
+        info.devices[id].cc = 100*prop.major + 10*prop.minor;"""
+new = """        info.devices[id].smpbo = prop.sharedMemPerBlockOptin;
+        // Blackwell driver bug: sharedMemPerBlockOptin can report 0 or 0x100000001.
+        // Clamp to the base limit so the MMQ dispatcher keeps working.
+        if (info.devices[id].smpbo == 0 || info.devices[id].smpbo > 1024*1024) {
+            info.devices[id].smpbo = prop.sharedMemPerBlock;
+        }
+        info.devices[id].cc = 100*prop.major + 10*prop.minor;"""
+assert old in s, "smpbo patch target not found in ggml-cuda.cu"
+io.open(p, "w", encoding="utf-8").write(s.replace(old, new, 1))
+print("patched smpbo clamp into ggml-cuda.cu")
+PY
+    then
+        echo "ERROR: smpbo patch failed; aborting build (set SMPBO_PATCH=0 to skip)"; exit 1
+    fi
+else
+    echo "SMPBO_PATCH=0 - skipping the Blackwell shared-memory clamp"
+fi
 cmake -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
     -DGGML_CUDA=ON \
     -DCMAKE_CUDA_ARCHITECTURES="$ARCH" \
