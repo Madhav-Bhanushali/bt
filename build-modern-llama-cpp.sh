@@ -29,6 +29,10 @@ if ! command -v cmake >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
     fi
 fi
 
+# --- CUDA toolkit ------------------------------------------------------------
+if [[ -x /usr/local/cuda/bin/nvcc ]]; then
+    export PATH=/usr/local/cuda/bin:$PATH   # installed but not on PATH
+fi
 command -v nvcc >/dev/null 2>&1 || { echo "ERROR: CUDA toolkit not found (nvcc)"; exit 1; }
 echo "nvcc: $(nvcc --version | grep release)"
 echo "CUDA arch: $ARCH (set CUDA_ARCH=100 for Blackwell, 86 for A10G if native fails)"

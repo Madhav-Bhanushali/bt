@@ -38,6 +38,8 @@ UBATCH=2048
 NGL=999                    # offload as many layers as possible
 FLASH_ATTN=1
 USE_GPU=auto               # auto = use GPU if detected
+TAG=""                     # A/B label for the results block
+EXTRA_ARGS=""              # extra flags passed verbatim to llama-server
 DRY_RUN=0
 MODEL_KEY=ternary-8b
 LLAMA_SERVER="${LLAMA_SERVER:-}"
@@ -74,6 +76,8 @@ usage() {
     echo "  --dry-run             print detected hardware + recommended settings"
     echo "  --no-cache-prompt     disable prompt-prefix KV reuse"
     echo "  --threads N           override auto thread count"
+    echo "  --tag NAME            label this run in results (A/B testing)"
+    echo "  --extra-args \"...\"     extra flags passed verbatim to llama-server"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -93,6 +97,8 @@ while [[ $# -gt 0 ]]; do
         --port) PORT="$2"; shift 2 ;;
         --timeout) REQUEST_TIMEOUT="$2"; shift 2 ;;
         --threads) THREADS="$2"; shift 2 ;;
+        --tag) TAG="$2"; shift 2 ;;
+        --extra-args) EXTRA_ARGS="$2"; shift 2 ;;
         --no-gpu) USE_GPU=no; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         --no-cache-prompt) CACHE_PROMPT=0; shift ;;
@@ -343,6 +349,7 @@ start_server() {
         --seed 42 \
         --parallel "$PARALLEL" \
         "${GPU_FLAGS[@]}" \
+        ${EXTRA_ARGS:-} \
         >"$log" 2>&1 &
     SERVER_PID=$!
     if wait_server_ready; then
@@ -499,6 +506,8 @@ PY
     echo "Server: $LLAMA_SERVER | threads $THREADS | parallel $PARALLEL | ctx $CTX | predict $PREDICT | batch $BATCH/$UBATCH"
     echo "GPU: ${GPU_NAME:-none} | offload: $([ "$USE_GPU_RUN" -eq 1 ] && echo "-ngl $NGL" || echo CPU) | flash-attn: $([ "$FLASH_ATTN" -eq 1 ] && echo yes || echo no)"
     echo "Rounds/level: $ROUNDS | cache_prompt: $CACHE_PROMPT | req timeout: ${REQUEST_TIMEOUT}s"
+    if [[ -n "$TAG" ]]; then echo "Tag: $TAG"; fi
+    if [[ -n "$EXTRA_ARGS" ]]; then echo "Extra server args: $EXTRA_ARGS"; fi
     echo
 } >> "$RESULTS"
 

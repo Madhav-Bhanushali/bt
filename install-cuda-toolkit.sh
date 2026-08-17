@@ -27,7 +27,10 @@ apt-get update -qq
 echo "Installing CUDA toolkit 13.0 ..."
 apt-get install -y cuda-toolkit-13-0
 
+echo "Persisting CUDA on PATH for all shells ..."
+echo 'export PATH=/usr/local/cuda/bin:$PATH' > /etc/profile.d/cuda.sh
+. /etc/profile.d/cuda.sh
+
 echo
-echo "Done. Add CUDA to PATH now and for future shells:"
-echo '  export PATH=/usr/local/cuda/bin:$PATH'
+echo "Done. CUDA is on PATH now and in every new shell:"
 echo '  nvcc --version'
