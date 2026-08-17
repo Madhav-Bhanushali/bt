@@ -25,6 +25,8 @@ FILE="${1:-Ternary-Bonsai-8B-TQ2_0.gguf}"
 case "$FILE" in
     Q2_0|Q2_0_g64|Q2_0-lossless)
         REPO="$PRISMML_REPO"; FILE="Ternary-Bonsai-8B-Q2_0_g64.gguf" ;;
+    Q2_0-g128|g128)
+        REPO="$PRISMML_REPO"; FILE="Ternary-Bonsai-8B-Q2_0.gguf" ;;   # PrismML fork format (group 128)
     F16)
         REPO="$PRISMML_REPO"; FILE="Ternary-Bonsai-8B-F16.gguf" ;;
     Q4_0|Q4_0-lossless)
