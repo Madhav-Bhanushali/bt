@@ -1,61 +1,82 @@
 # Ternary Bonsai 8B — Performance Metrics
 
-Measured on the GPU box (`gpu-vm`) with the concurrency/latency stress test
-(`stress-test.sh`). Model: `Minarut/Ternary-Bonsai-8B-GGUF-llamacpp-compatible`.
+Measured on the production GPU box (`dev-markytics-6000ada`, RTX PRO 6000 Blackwell
+Server Edition) with `stress-test.sh`. See `OPTIMIZATION_PLAN.md` and
+`CLAUDE_CONTEXT.md` for the full testing history and closure verdict.
 
-## Hardware
+## Hardware (current box)
 
 | Resource | Value |
 |---|---|
-| GPU | NVIDIA A10G (23028 MiB, ~18364 MiB free) |
-| CPU threads | 8 |
-| RAM | 30 GB |
-| Driver / CUDA | 580.173.02 / 13.0 (toolkit 12.4) |
+| GPU | RTX PRO 6000 Blackwell Server Edition (96 GB, 1.79 TB/s, sm_100) |
+| CPU threads | 64 |
+| Driver | 610.57.04 (CUDA UMD 13.3; toolkit 13.0) |
+| Server | modern llama.cpp master, CUDA build (`~/llama.cpp/build_cuda/bin/llama-server`) |
+| Model | `standard/Ternary-Bonsai-8B-Q2_0_g64.gguf` (2.15 GB, lossless) |
 
-## Stack comparison (worst → best)
+## Baseline (running config: `parallel=31/ctx=16384`, predict 64)
 
-| Metric | 1. TQ2_0 CPU<br>(fork `build_server`) | 2. TQ2_0 GPU<br>(fork `build_cuda`, no CUDA kernel) | 3. Q4_0 GPU<br>(fork `build_cuda`) | 4. Q4_0 GPU<br>(modern llama.cpp) |
-|---|---|---|---|---|
-| Model file | 2.12 GB TQ2_0 | 2.12 GB TQ2_0 | 4.61 GB Q4_0-lossless | 4.61 GB Q4_0-lossless |
-| Gen speed @ conc 1 | 9.5 tok/s | 17.7–19.1 tok/s | 88.1 tok/s | **88.1 tok/s** |
-| Reply latency p50 @ conc 1 (predict 64) | 6.8 s | 3.4–3.7 s | 0.55 s | **0.55 s** |
-| Reply latency p50 @ conc 8 | 13.1 s | 12.3 s | 1.57 s | **1.49 s** |
-| Max throughput | 0.61 req/s | ~0.65 req/s | 5.43 req/s | **6.15 req/s** |
-| Best concurrency | 32 | 8+ | 32 | **32** |
-| Failures | HTTP-000 ×4 @ conc 4 | none | none | **none (96/96 @ 32)** |
-| TTFT p50 | 92–275 ms | 54–117 ms | 12–31 ms | **12–33 ms** |
-| GPU VRAM used | 0 | ~1.8 GB | ~6.2 GB | **~6.0 GB** |
+| Concurrency | Gen tok/s | Lat p50 | TTFT p50 | Req/s | Success |
+|---|---|---|---|---|---|
+| 1 | **307.6** | 179 ms | 4 ms | 5.19 | 100% |
+| 2 | 232.5 | 257 ms | 5 ms | 7.48 | 100% |
+| 4 | 159.8 | 368 ms | 6 ms | 10.69 | 100% |
+| 8 | 95.4 | 592 ms | 10 ms | 13.04 | 100% |
+| 16 | 71.0 | 815 ms | 12 ms | 13.45 | 100% |
+| 32 | 70.8 | 1507 ms | 13 ms | 15.27 | 100% |
 
-## Best configuration (current recommendation)
+Aggregate at conc 32 ≈ **~800–1160 tok/s** (queue p50 ~23 ms at 31 slots).
+Single-stream ceiling ≈ **37%** of theoretical BW-limited throughput.
+
+## Consolidated A/B comparison (all dispatch/config variants — plan Steps 1–6)
+
+| Variant | conc1 tok/s | conc32 aggregate | Verdict |
+|---|---|---|---|
+| baseline | 311.4 | 1156 | running config |
+| force_cublas | 308.3 | 717 | 38% worse — ruled out |
+| force_mmq | 315.4 | 1160 | matches baseline |
+| graphs_on (`GGML_CUDA_GRAPH_OPT=1`) | 301.1 | 1155 | matches baseline |
+| prismml_g128 fork | 315.9 | 1128 | slightly worse, not adopted |
+| ub_4096 | 311.7 | — | no-op (ruled out) |
+| threads16 | 311.5 | — | no-op (ruled out) |
+| kv q8_0 (`-ctk/-ctv`) | 285.5 | — | 8% worse (ruled out) |
+| q2vdr2 custom kernel | 289.3 | — | slower AND garbled output — rejected |
+| clean_master_25603 | 311.2 | — | = baseline; #25603 already present |
+
+## Final conclusion
+
+**~310 tok/s single-stream is the confirmed practical ceiling** for
+Ternary-Bonsai-8B / Q2_0 / llama.cpp / RTX PRO 6000 Blackwell as of this round.
+Every lever (dispatch, CUDA graphs, batch/thread config, KV quant, alternate
+fork, the one real upstream kernel fix) has been tested; none move it. Closing
+the gap to 500 tok/s requires a materially better CUDA 2-bit GEMV kernel than
+exists anywhere in the open-source ecosystem today — a research contribution,
+out of scope for this deployment pass.
+
+Options to bring to the model owner:
+1. Accept ~310 tok/s single-stream as the number.
+2. Treat 500 tok/s as an **aggregate/system** throughput target — already
+   exceeded (~1150–1160 tok/s at conc32).
+
+## Best configuration (keep)
 
 | Setting | Value |
 |---|---|
-| Server | `/home/ubuntu/llama.cpp/build_cuda/bin/llama-server` (modern llama.cpp, CUDA) |
-| Model | `models/standard/Ternary-Bonsai-8B-Q4_0-lossless.gguf` |
+| Server | `~/llama.cpp/build_cuda/bin/llama-server` (mainline master, no custom kernel patches) |
+| Model | `standard/Ternary-Bonsai-8B-Q2_0_g64.gguf` |
 | Offload | `-ngl 999` (all layers) |
 | Flash attention | `-fa on` |
-| Parallel slots | 12 |
-| Context | 8192 (total, ~682 tokens/slot) |
+| Parallel slots | 31 |
+| Context | 16384 (total) |
 | Predict | 64 |
-| Threads | 8 |
+| Threads | 64 |
 | Batch | 4096 / 2048 |
-| cache_prompt | on |
+
+Before benchmarking any new build, run `verify-output.sh` (output-legibility gate).
 
 ```
-LLAMA_SERVER=/home/ubuntu/llama.cpp/build_cuda/bin/llama-server bash stress-test.sh
+LLAMA_SERVER=~/llama.cpp/build_cuda/bin/llama-server bash stress-test.sh \
+  --model standard/Ternary-Bonsai-8B-Q2_0_g64.gguf --tag <name>
 ```
-
-## Key takeaways
-
-- 8B Q4_0 single-stream generation is **memory-bandwidth bound** at ~88 tok/s on the
-  A10G — identical for the 2025 BitNet fork and 2026 llama.cpp. That's a hard
-  ~0.55 s floor per 64-token reply.
-- Throughput scales to ~6.15 req/s at 32 concurrent (100% success) — queue-bound at
-  that point (p50 queue ~1.9 s), expected for a stress test.
-- The ternary TQ2_0 quant has **no CUDA kernel** in llama.cpp; it runs on CPU even
-  when loaded into VRAM (~18 tok/s). Q4_0-lossless encodes the identical {-1,0,1}
-  weights losslessly and is fully GPU-accelerated.
-
-## Individual run data
 
 Detailed per-concurrency results are appended to `stress_results.txt` on the server.

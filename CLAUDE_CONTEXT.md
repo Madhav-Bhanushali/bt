@@ -60,21 +60,23 @@ Aggregate at conc 32 ≈ **~800 tok/s** (was 12 slots; new 32-slot build pending
   (PR #22338), guarded to cuBLAS fallback (PR #26141). Single-stream uses MMVQ, so
   the 307 stands. Batched/prefill may also be degraded on Blackwell.
 
-## 7. Open questions we want suggestions on
-1. **Any kernel/path that beats Q2_0 MMVQ on Blackwell for single-stream gen?**
-   (e.g., forcing MMQ for token batches, tensor-core / mma ternary kernels,
-   cuBLAS GEMV vs vec-dot, `GGML_CUDA_*` env toggles, CUDA graphs in server.)
-2. **Is the PrismML fork (`PrismML-Eng/llama.cpp`, g128 Q2_0 CUDA kernels)
-   worth switching to** for better Blackwell tuning? (Their g128 kernels are
-   production-hardened; ~+6% on L40S vs mainline g64.) Requires their
-   `Ternary-Bonsai-8B-Q2_0.gguf` (g128) file.
-3. **Config knobs to try:** ubatch 4096, threads 16 vs 64, KV quant
-   (`-ctk/-ctv`), `-fa on/off`, bigger ctx (VRAM is essentially free).
-4. **Is 500+ tok/s single-stream realistic on this GPU + llama.cpp master?**
-   If not, is the target better defined as aggregate throughput (already ~800+
-   tok/s and rising with 32 slots)?
-5. **Alternative servers:** vLLM ternary/BitNet support vs llama-server for this
-   workload (latency-focused, predict 64, continuous batching).
+## 7. STATUS: CLOSED (2026-08-17) — do not re-open without new upstream kernel work
+
+All levers from `OPTIMIZATION_PLAN.md` have been tested and closed. Summary:
+- `force_cublas` / `force_mmq` / `graphs_on` / `prismml_g128` / `ub_4096` /
+  `threads16` / `kv q8_0` / `q2vdr2` (custom kernel — rejected: slower AND
+  garbled output) / `clean_master_25603` (was already present). None moved
+  single-stream beyond noise.
+- **~310 tok/s single-stream is the confirmed practical ceiling** (37% BW
+  efficiency). Closing to 500 tok/s needs a materially better CUDA 2-bit GEMV
+  kernel — a research contribution, out of scope here.
+- bitnet.cpp on Intel Arc (BMG) hits near-ideal BW for 2-bit GEMV (proof the
+  ceiling is CUDA kernel maturity, not physics) but is not usable on
+  CUDA/Blackwell today.
+- **Model-owner decision needed:** accept ~310 tok/s single-stream, OR treat
+  500 tok/s as aggregate/system throughput (already ~1150–1160 tok/s at conc32).
+
+Before benchmarking any future build, run `verify-output.sh` first.
 
 ## 8. How to run (on the box)
 ```bash
